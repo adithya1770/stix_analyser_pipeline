@@ -1,0 +1,28 @@
+STIX 1.x XML → JSON (brief steps)
+
+Load the XML file using an XML parser (not regex).
+
+Detect STIX version from
+version="stix-1.2.1".
+
+Locate <stix:Indicator> block
+(this contains the actual threat data).
+
+Extract only these fields:
+
+Indicator Type
+
+Description
+
+Timestamp
+
+Observable value (URL / IP / domain)
+
+Split multiple values
+(##comma## → separate indicators).
+
+Create a simple JSON object representing the indicator.
+
+Save this JSON as intermediate output.
+
+Later map this JSON to common CTI format.

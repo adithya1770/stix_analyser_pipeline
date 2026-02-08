@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+nest_asyncio
+pandas
+scikit-learn
+lightgbm
+sentence-transformers
+joblib
+gensim
+matplotlib
+seaborn
+networkx
+shap

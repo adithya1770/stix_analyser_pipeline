@@ -1,0 +1,294 @@
+1 — Quick overview (what to aim for)
+
+Goal: from your notebook → a reproducible project that is:
+
+reliable (tests, reproducible results)
+
+explainable (why model said threat)
+
+polished UI + API
+
+evaluated (metrics, confusion matrix)
+
+documented (report + slides + demo script)
+
+You’ll do this in 4 phases: stabilize → improve model → productize → polish & demo.
+
+2 — Phase 0: housekeeping (5–30 minutes)
+
+Do these first — they pay off a lot.
+
+Create a project folder:
+
+project/
+  data/
+  notebooks/
+  src/
+  api/
+  frontend/
+  models/
+  docs/
+  requirements.txt
+  README.md
+
+
+Create requirements.txt (example):
+
+fastapi
+uvicorn
+nest_asyncio
+pandas
+scikit-learn
+lightgbm
+sentence-transformers
+joblib
+gensim
+matplotlib
+seaborn
+networkx
+shap
+
+
+Install:
+
+python -m pip install -r requirements.txt
+
+
+Fix random seeds for reproducibility:
+
+import random, numpy as np
+random.seed(42)
+np.random.seed(42)
+
+3 — Phase 1: Stabilize & clean pipeline (1–3 hours)
+
+Make the pipeline dependable and readable.
+
+A. Single pipeline function
+
+Refactor parsing → CTI → feature generation → prediction into functions in src/pipeline.py. Example layout:
+
+# src/pipeline.py
+def detect_stix_version(raw_text_or_json)->str: ...
+def parse_stix(raw)->dict:  # returns single unified CTI dict
+def validate_cti(cti)->(cti_with_flags): ...
+def make_text(cti)->str: ...
+def predict_text(text, model, vectorizer)->(label, prob): ...
+
+
+This makes the notebook minimal and easy to call from API/UI.
+
+B. Make a small test file
+
+Add a couple of STIX example files in data/ and write a tiny test script tests/test_pipeline.py that loads them and checks outputs (e.g., assert parse_stix(...)["entity_type"] is not None).
+
+C. Logging
+
+Add lightweight logging to the pipeline (use logging module) so errors are understandable in the demo.
+
+4 — Phase 2: Improve model (4–8 hours) — best single upgrade
+
+You already have TF-IDF + Logistic Regression. Upgrade to sentence embeddings + LightGBM and add a few features.
+
+Why: big semantic gain with minimal complexity.
+Steps
+
+Install sentence-transformers:
+
+pip install sentence-transformers
+
+
+Compute embeddings for each sample:
+
+from sentence_transformers import SentenceTransformer
+model_sbm = SentenceTransformer('all-MiniLM-L6-v2')   # small and fast
+merged_df["combined"] = merged_df["indicator_type"].astype(str)+" "+merged_df["description"].astype(str)+" "+merged_df["values"].astype(str)
+emb = model_sbm.encode(merged_df["combined"].tolist(), show_progress_bar=True)
+# emb is a 2D numpy array
+
+
+Add structured features (counts, flags):
+
+merged_df["num_ext_refs"] = merged_df["values"].str.count("http")  # or length of values list
+merged_df["alias_count"] = merged_df["indicator_type"].str.count(",") + 1
+merged_df["recent_age_days"] = (pd.Timestamp.now() - pd.to_datetime(merged_df["Date"])).dt.days.fillna(999)
+
+
+Train LightGBM:
+
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+X_emb = np.hstack([emb, merged_df[["num_ext_refs","alias_count","recent_age_days"]].fillna(0).values])
+y = merged_df["Threat_Label"].values
+X_tr, X_te, y_tr, y_te = train_test_split(X_emb, y, test_size=0.2, stratify=y, random_state=42)
+train_data = lgb.Dataset(X_tr, label=y_tr)
+params = {"objective":"binary", "metric":"auc","verbosity":-1}
+bst = lgb.train(params, train_data, num_boost_round=200)
+# predict
+pred_prob = bst.predict(X_te)
+pred = (pred_prob>0.5).astype(int)
+
+
+Evaluate and show metrics (accuracy, precision, recall, f1, ROC-AUC) and confusion matrix:
+
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+print(classification_report(y_te, pred))
+print("AUC:", roc_auc_score(y_te,pred_prob))
+
+
+Save model & encoder:
+
+import joblib
+joblib.dump(bst, "models/lgb_gbst.joblib")
+joblib.dump(model_sbm, "models/sbert_model.joblib")  # or load by name in production
+
+
+Result: much better semantic detection and realistic generalization.
+
+5 — Phase 3: Explainability & Credibility (2–4 hours)
+
+Make it interpretable and trustworthy.
+
+Credibility improvements
+
+compute credibility_score as weighted sum of:
+
+validation_flag (2 pts)
+
+num_external_references (>0 => +2)
+
+has_official_source (url contains mitre, microsoft, trendmicro => +2)
+
+alias_count (+1)
+
+freshness (recent -> +1)
+Normalize to 0–10.
+
+Explainability
+
+For LightGBM use SHAP:
+
+import shap
+explainer = shap.TreeExplainer(bst)
+shap_vals = explainer.shap_values(X_te)
+# show top contributing features for one sample
+shap.summary_plot(shap_vals, X_te)   # for notebook
+
+
+For embedding-based prediction, also return the top-k nearest training examples (k-NN on embeddings) as references to justify decision.
+
+6 — Phase 4: API & Frontend (4–10 hours)
+
+Expose a clean demo.
+
+A. FastAPI /analyze_stix endpoint (single simple flow)
+
+Accept a file (UploadFile)
+
+Detect version
+
+Parse → produce CTI dict
+
+Compute embedding + features
+
+Load trained classifier
+
+Predict probability
+
+Compute credibility
+
+Return JSON: {prediction, probability, credibility_score, reasons, cti}
+
+Minimal example:
+
+@app.post("/analyze_stix")
+async def analyze(file: UploadFile = File(...)):
+    data = await file.read()
+    stix_obj = parse_stix(data)   # return unified dict
+    text = make_text(stix_obj)
+    emb = sbert.encode([text])
+    features = build_features_from_cti(stix_obj)
+    X = np.hstack([emb, features.reshape(1,-1)])
+    prob = bst.predict(X)[0]
+    cred = compute_credibility(stix_obj)
+    return {"prediction": int(prob>0.5), "probability": float(prob), "credibility": cred, "cti": stix_obj}
+
+B. Frontend (React + Tailwind) minimal UI
+
+Page 1: File upload → show response card (prediction, prob, credibility)
+
+Page 2: CTI preview table
+
+Page 3: Graph view (network) for relationships (use cytoscape.js)
+
+Use Axios to call /analyze_stix. Keep the UI minimal but clean — a single upload box and result card is enough for demo.
+
+7 — Phase 5: Evaluation & robustness (2–4 hours)
+
+Make your results rigorous.
+
+Use stratified k-fold cross validation (k=5) and report mean ± std for metrics.
+
+Show confusion matrix and sample false positives/negatives.
+
+If possible, hold out a small “unseen” MITRE-derived sample set to demonstrate generalization.
+
+Use class weights or subsampling if imbalanced, or show ROC curve.
+
+Code snippet for k-fold:
+
+from sklearn.model_selection import StratifiedKFold
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores=[]
+for tr,te in skf.split(X_emb,y):
+    ... train and eval ...
+
+8 — Phase 6: Productionize & polish (4–8 hours)
+
+Make it look and run like a real product.
+
+Dockerize:
+
+Dockerfile for API
+
+optional docker-compose for API + frontend
+
+Persist history: SQLite table for analyses with timestamp + JSON result (so demo shows history).
+
+Add basic tests (pytest) for parse_stix, make_text, compute_credibility.
+
+Add README with setup & run commands, and a run_demo.sh.
+
+Create small PPT (8–10 slides) and 8–10 minute demo script (I can generate both).
+
+Add code comments and tidy notebooks.
+
+9 — Nice extras (standout features)
+
+Add any of these to impress:
+
+Relationship graph interactive in the frontend (click node → metadata)
+
+Explainability card: show top 3 reasons why model chose threat (SHAP + nearest neighbors)
+
+Simple feedback loop in UI to label wrong predictions and save for later retraining
+
+Rate limit + API keys in FastAPI (for product feel)
+
+CI: basic GitHub Action to run tests and lint
+
+10 — Example minimal command list to progress this week
+
+Follow this list to go from rudimentary → strong deliverable.
+
+Refactor pipeline and add tests (2–3 hours)
+
+Replace TF-IDF with SBERT + LightGBM (3–5 hours)
+
+Credibility scoring + SHAP explanation (2–4 hours)
+
+FastAPI /analyze_stix that returns prediction + credibility (2–3 hours)
+
+Simple React UI for upload + result (3–6 hours)
+
+Dockerize + README + PPT + demo script (3–6 hours

@@ -29,3 +29,19 @@ def train_model(df):
     print("Accuracy:", accuracy_score(test_y, prediction))
 
     return model, vectorizer
+
+def predict(model, vectorizer, text):
+
+    sample_vec = vectorizer.transform([text])
+
+    result = model.predict(sample_vec)[0]
+
+    if result == 1:
+        return "THREAT"
+    else:
+        return "BENIGN"
+
+def save_model(model, vectorizer):
+
+    pickle.dump(model, open("model.pkl", "wb"))
+    pickle.dump(vectorizer, open("vectorizer.pkl", "wb"))
